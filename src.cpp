@@ -78,7 +78,6 @@ pair<Mat, Mat> EstimateNoDynamicMotion(Mat left, Mat right, Mat next, Mat left_s
 	vector<Point2f> image_points;
 	CameraInfo cil = Decompose(P_left);
 	CameraInfo cir = Decompose(P_right);
-	waitKey(0);
 	KeyPointMatches kpm = AlignImages(left, next);
 	Mat disparity = CalculateDisparity(left, right);
 	vector<Point2f> left_pts;
@@ -106,6 +105,93 @@ pair<Mat, Mat> EstimateNoDynamicMotion(Mat left, Mat right, Mat next, Mat left_s
 		}
 	}
 	Mat R, t;
+	solvePnPRansac(object_points, image_points, cil.cameraMatrix, noArray(), R, t);
+	return { R, t };
+}
+
+
+
+pair<Mat, Mat> EstimateNoDynamicFilterMotion(Mat left, Mat right, Mat next, Mat left_segment, Mat P_left, Mat P_right, std::vector<int> dynamic)
+{
+	vector<Point3f> object_points;
+	vector<Point2f> image_points;
+	CameraInfo cil = Decompose(P_left);
+	CameraInfo cir = Decompose(P_right);
+	KeyPointMatches kpm = AlignImages(left, next);
+	Mat disparity = CalculateDisparity(left, right);
+	vector<Point2f> left_pts;
+	vector<Point2f> next_pts;
+	vector<uchar> status;
+	
+
+	vector<DMatch> potentiolly_dynamic;
+	float coeff = cil.cameraMatrix.at<float>(0, 0) * (cir.transVector.at<float>(0) - cil.transVector.at<float>(0));
+	for (auto& match : kpm.matches) {
+		float u = (float(kpm.kp1.at(match.queryIdx).pt.x));
+		float v = (float(kpm.kp1.at(match.queryIdx).pt.y));
+		if (std::find(dynamic.begin(), dynamic.end(), int(left_segment.at<uchar>(int(v), int(u)))) != dynamic.end()) {
+			potentiolly_dynamic.emplace_back(match);
+			continue;
+		}
+
+		else
+		{
+			float z = coeff / disparity.at<float>(int(v), int(u));
+			if (z < DEPTH_TRASH && z > 0) {
+
+				Point2f pt_2d(kpm.kp2.at(match.trainIdx).pt.x, kpm.kp2.at(match.trainIdx).pt.y);
+				float x = z * (u - cil.cameraMatrix.at<float>(0, 2)) / cil.cameraMatrix.at<float>(0, 0);
+				float y = z * (v - cil.cameraMatrix.at<float>(1, 2)) / cil.cameraMatrix.at<float>(1, 1);
+				object_points.emplace_back(Point3f{ x, y, z });
+				image_points.emplace_back(pt_2d);
+			}
+		}
+	}
+	Mat R, t;
+	solvePnPRansac(object_points, image_points, cil.cameraMatrix, noArray(), R, t);
+
+	// после того как произвели оценку, производим повторную фильтрацию
+	Mat r;
+	Rodrigues(R, r);
+	r.convertTo(r, CV_32F);
+	t.convertTo(t, CV_32F);
+
+
+	float x, y, z;
+	for (auto& match : potentiolly_dynamic)
+	{
+		float u = (float(kpm.kp1.at(match.queryIdx).pt.x));
+		float v = (float(kpm.kp1.at(match.queryIdx).pt.y));
+
+		z = coeff / disparity.at<float>(int(v), int(u));
+		if (z < DEPTH_TRASH && z > 0) {
+			x = z * (u - cil.cameraMatrix.at<float>(0, 2)) / cil.cameraMatrix.at<float>(0, 0);
+			y = z * (v - cil.cameraMatrix.at<float>(1, 2)) / cil.cameraMatrix.at<float>(1, 1);
+			Mat pt3d(Size(1, 3), CV_32F);
+			Mat t0(Size(1, 3), CV_32F);
+
+			pt3d.at<float>(0, 0) = x;
+			pt3d.at<float>(1, 0) = y;
+			pt3d.at<float>(2, 0) = z;
+
+			t0.at<float>(0, 0) = t.at<float>(0,0);
+			t0.at<float>(1, 0) = t.at<float>(0,1);
+			t0.at<float>(2, 0) = t.at<float>(0,2);
+			pt3d = r * pt3d + t0;
+
+
+			u = cil.cameraMatrix.at<float>(0, 0) * (x / z) + cil.cameraMatrix.at<float>(0, 2);
+			v = cil.cameraMatrix.at<float>(0, 0) * (y / z) + cil.cameraMatrix.at<float>(1, 2);
+
+			if ((kpm.kp2.at(match.trainIdx).pt.x - u) <= 50 && (kpm.kp2.at(match.trainIdx).pt.y - v) <= 50) //это не динамическая точка
+			{
+
+				Point2f pt_2d(kpm.kp2.at(match.trainIdx).pt.x, kpm.kp2.at(match.trainIdx).pt.y);
+				object_points.emplace_back(Point3f{ x, y, z });
+				image_points.emplace_back(pt_2d);
+			}
+		}
+	}
 	solvePnPRansac(object_points, image_points, cil.cameraMatrix, noArray(), R, t);
 	return { R, t };
 }
@@ -232,47 +318,27 @@ void VisualOdometry(const std::string& left_path, const std::string& right_path,
 	std::ofstream in(input);
 	for (int i = 0; i < NUM_OF_FRAMES; i+=step)
 	{
-		pair<Mat, Mat> TR = EstimateMotion(imread((*left_iterator).path().u8string()),
-			imread((*right_iterator).path().u8string()),
-			imread((*next_iterator).path().u8string()), PLeft, PRight);
+		pair<Mat, Mat> TR = EstimateMotion(imread((*left_iterator).path().u8string()), imread((*right_iterator).path().u8string()),
+										   imread((*next_iterator).path().u8string()), PLeft, PRight);
 
-		TR.first.convertTo(TR.first, CV_32F); // здесь были ошибки с типами до без этих строк  - Ransac возвращает в дабле
+		TR.first.convertTo(TR.first, CV_32F); 
 		TR.second.convertTo(TR.second, CV_32F);
-		/*
-		double x = TR.first.at<float>(0, 0);
-		double y = TR.first.at<float>(1, 0);
-		double z = TR.first.at<float>(2, 0);
-		double theta = sqrt(x * x + y * y + z * z);
-		cout << theta << " " << x << " " << y << " " << z  << " " << x / theta << " " << y / theta << " " << z / theta << endl;*/
-		vector<double> angles_vecs = GetAnglesVecsFromQuat(TR.first, TR.second);
 
-		double initial_point[7];
-		vector<Vec3f> pts3d;
-		vector<Vec2f> pts2d;
-
-
-		for (int i = 0; i < 7; ++i)
-			initial_point[i] = angles_vecs[i];
-
-		Mat eval = ReconstructFromQUAT(initial_point);
 		Mat R;
 		cv::Rodrigues(TR.first, R);
 		Mat Rt = Mat::eye(Size(4,4), CV_64F);
 		R.copyTo(Rt(Rect(0,0,3,3)));
 		TR.second.copyTo(Rt(Rect(3, 0, 1, 3)));
-		Mat q;
-		eval.convertTo(q, CV_64F);
-		q = q - Rt;
-		cout << q << endl;
 		GLOBAL_P *= Rt.inv();
 		advance(left_iterator, START_KEY_FRAME + step);
 		advance(next_iterator, START_KEY_FRAME + step);
 		advance(right_iterator, START_KEY_FRAME + step);
 		in << GLOBAL_P.at<double>(0, 3) << " " << GLOBAL_P.at<double>(1, 3) << " " << GLOBAL_P.at<double>(2, 3) << std::endl;
+		cout << i << endl;
 	}
 }
 void VisualNoDynamic(const std::string& left_path, const std::string& left_path_segment, const std::string& right_path, const std::string& input, const Mat& PLeft, const Mat& PRight,
-	std::vector<int> dynamic, const int step)
+	std::vector<int> dynamic, const int step, const bool filter)
 {
 	Mat GLOBAL_P = Mat::eye(4, 4, CV_64F);
 
@@ -281,18 +347,27 @@ void VisualNoDynamic(const std::string& left_path, const std::string& left_path_
 	fs::directory_iterator next_iterator(left_path);
 	fs::directory_iterator segment_iterator(left_path_segment);
 
-	advance(right_iterator, START_KEY_FRAME);
 	advance(left_iterator, START_KEY_FRAME);
-	advance(segment_iterator, START_KEY_FRAME);
 	advance(next_iterator, START_KEY_FRAME + step);
+	advance(right_iterator, START_KEY_FRAME);
+	advance(segment_iterator, START_KEY_FRAME);
 	std::ofstream in(input);
+	Mat src = imread((*left_iterator).path().u8string());
 	for (int i = 0; i < NUM_OF_FRAMES; i += step)
 	{
 		Mat left_segment = imread((*segment_iterator).path().u8string());
 		cv::cvtColor(left_segment, left_segment, CV_BGR2GRAY);
-		pair<Mat, Mat> TR = EstimateNoDynamicMotion(imread((*left_iterator).path().u8string()),
-			imread((*right_iterator).path().u8string()),
-			imread((*next_iterator).path().u8string()), left_segment, PLeft, PRight, dynamic);
+		Mat resized_seg;
+		resize(left_segment, resized_seg, Size(src.cols, src.rows), INTER_LINEAR);
+		pair<Mat, Mat> TR;
+		if (filter)
+			TR = EstimateNoDynamicFilterMotion(imread((*left_iterator).path().u8string()),
+				imread((*right_iterator).path().u8string()),
+				imread((*next_iterator).path().u8string()), resized_seg, PLeft, PRight, dynamic);
+		else
+			TR = EstimateNoDynamicMotion(imread((*left_iterator).path().u8string()),
+				imread((*right_iterator).path().u8string()),
+				imread((*next_iterator).path().u8string()), resized_seg, PLeft, PRight, dynamic);
 		Mat R;
 		cv::Rodrigues(TR.first, R);
 		Mat Rt = Mat::eye(Size(4, 4), CV_64F);
@@ -303,11 +378,12 @@ void VisualNoDynamic(const std::string& left_path, const std::string& left_path_
 		advance(next_iterator, START_KEY_FRAME + step);
 		advance(right_iterator, START_KEY_FRAME + step);
 		advance(segment_iterator, START_KEY_FRAME + step);
-		//myfile >> y;
 		cout << "I------------> " << i << endl;
 		in << GLOBAL_P.at<double>(0, 3) << " " << GLOBAL_P.at<double>(1, 3) << " " << GLOBAL_P.at<double>(2, 3) << std::endl;
 		
 	}
 }
+
+
 
 
