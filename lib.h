@@ -16,6 +16,7 @@
 #include <vector>
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
+#include <ceres/loss_function.h>
 
 namespace fs = std::experimental::filesystem;
 using namespace cv;
@@ -74,10 +75,10 @@ struct SnavelyReprojectionErrorPtsOld
 
 
 
-struct SnavelyReprojectionErrorPtsOldQUAT 
+struct SnavelyReprojectionErrorPtsOldQUAT
 {
-	SnavelyReprojectionErrorPtsOldQUAT(double observed_x, double observed_y, double fx, double fy, double cx, double cy) : 
-		observed_x(observed_x), observed_y(observed_y), fx(fx), fy(fy), cx(cx), cy(cy) {}
+	SnavelyReprojectionErrorPtsOldQUAT(double observed_x, double observed_y, double fx, double fy, double cx, double cy, double width, double height, double tnorm) :
+		observed_x(observed_x), observed_y(observed_y), fx(fx), fy(fy), cx(cx), cy(cy), width(width), height(height), tnorm(tnorm) {}
 
 	template <typename T>
 	bool operator()(const T* const quat_t, const T* const z, T* residuals) const
@@ -104,21 +105,185 @@ struct SnavelyReprojectionErrorPtsOldQUAT
 
 		T predicted_x = T(fx) * (P3[0]) / P3[2] + T(cx);
 		T predicted_y = T(fy) * (P3[1]) / P3[2] + T(cy);
+		T r = tx * tx + ty * ty + tz * tz;
 
 		residuals[0] = (predicted_x - T(observed_x));
 		residuals[1] = (predicted_y - T(observed_y));
+		/*
+		residuals[2] = is_ground == true ? (y - T(1.65)) : T(0);
+		residuals[3] = (x > T(width) || x < 0) || (y > T(height) || y < 0) ? T(10000) : T(0);
+		residuals[4] = T(tnorm * tnorm) > r ? T(10000) : T(0);
+		residuals[5] = (xv * xv + yv * yv + zv * zv - one) * T(10000);
+		*/
 		return true;
 	}
-	static ceres::CostFunction* Create(const double observed_x, const double observed_y, const double fx, const double fy, const double cx, const double cy)
+	static ceres::CostFunction* Create(const double observed_x, const double observed_y, const double fx, const double fy, 
+		const double cx, const double cy,  const double width, const double height, const double tnorm)
 	{
-		return (new ceres::AutoDiffCostFunction<SnavelyReprojectionErrorPtsOldQUAT, 2, 7, 1>(new SnavelyReprojectionErrorPtsOldQUAT(observed_x, observed_y, fx, fy, cx, cy)));
+		return (new ceres::AutoDiffCostFunction<SnavelyReprojectionErrorPtsOldQUAT, 2, 7, 1>(new SnavelyReprojectionErrorPtsOldQUAT(observed_x, observed_y,
+			fx, fy, cx, cy, width, height, tnorm)));
 	}
 
 	double observed_x;
 	double observed_y;
 	double fx, fy, cx, cy;
+	double tnorm;
+	double width, height;
+};
+struct Regul
+{
+	Regul(double observed_x, double observed_y, double fx, double fy, double cx, double cy, double width, double height, double tnorm) :
+		observed_x(observed_x), observed_y(observed_y), fx(fx), fy(fy), cx(cx), cy(cy), width(width), height(height), tnorm(tnorm) {}
+
+	template <typename T>
+	bool operator()(const T* const quat_t, const T* const z, T* residuals) const
+	{
+
+		T P3[3];
+
+		T theta = quat_t[0];
+		T xv = quat_t[1];
+		T yv = quat_t[2];
+		T zv = quat_t[3];
+
+		T tx = quat_t[4];
+		T ty = quat_t[5];
+		T tz = quat_t[6];
+
+		T x = z[0] * (T(observed_x) - T(cx)) / T(fx);
+		T y = z[0] * (T(observed_y) - T(cy)) / T(fy);
+
+		T one = T(1);
+		P3[0] = (cos(theta) + (one - cos(theta)) * xv * xv) * x + ((one - cos(theta)) * xv * yv - sin(theta) * zv) * y + ((one - cos(theta)) * xv * zv + sin(theta) * yv) * z[0] + tx;
+		P3[1] = ((one - cos(theta)) * yv * xv + sin(theta) * zv) * x + (cos(theta) + (one - (cos(theta))) * yv * yv) * y + ((one - (cos(theta))) * yv * zv - (sin(theta)) * xv) * z[0] + ty;
+		P3[2] = ((one - cos(theta)) * zv * xv - sin(theta) * yv) * x + ((one - cos(theta)) * zv * yv + sin(theta) * xv) * y + (cos(theta) + (one - cos(theta)) * zv * zv) * z[0] + tz;
+
+		T predicted_x = T(fx) * (P3[0]) / P3[2] + T(cx);
+		T predicted_y = T(fy) * (P3[1]) / P3[2] + T(cy);
+		T r = tx * tx + ty * ty + tz * tz;
+
+		//residuals[1] = (x > T(width) || x < 0) || (y > T(height) || y < 0) ? T(1000) : T(0);
+		residuals[0] = exp(T(tnorm * tnorm) - r)*T(100); //T(tnorm * tnorm) > r ? T(1000) : T(0);
+		residuals[1] = (xv * xv + yv * yv + zv * zv - one) * T(10000);
+		return true;
+	}
+	static ceres::CostFunction* Create(const double observed_x, const double observed_y, const double fx, const double fy,
+		const double cx, const double cy, const double width, const double height, const double tnorm)
+	{
+		return (new ceres::AutoDiffCostFunction<Regul, 2, 7, 1>(new Regul(observed_x, observed_y,
+			fx, fy, cx, cy, width, height, tnorm)));
+	}
+
+	double observed_x;
+	double observed_y;
+	double fx, fy, cx, cy;
+	double tnorm;
+	double width, height;
+	bool is_ground;
 };
 
+struct RegulFloor
+{
+	RegulFloor(double observed_x, double observed_y, double fx, double fy, double cx, double cy, double width, double height, double tnorm) :
+		observed_x(observed_x), observed_y(observed_y), fx(fx), fy(fy), cx(cx), cy(cy), width(width), height(height), tnorm(tnorm) {}
+
+	template <typename T>
+	bool operator()(const T* const quat_t, const T* const z, T* residuals) const
+	{
+
+		T P3[3];
+
+		T theta = quat_t[0];
+		T xv = quat_t[1];
+		T yv = quat_t[2];
+		T zv = quat_t[3];
+
+		T tx = quat_t[4];
+		T ty = quat_t[5];
+		T tz = quat_t[6];
+
+		T x = z[0] * (T(observed_x) - T(cx)) / T(fx);
+		T y = z[0] * (T(observed_y) - T(cy)) / T(fy);
+
+		T one = T(1);
+		P3[0] = (cos(theta) + (one - cos(theta)) * xv * xv) * x + ((one - cos(theta)) * xv * yv - sin(theta) * zv) * y + ((one - cos(theta)) * xv * zv + sin(theta) * yv) * z[0] + tx;
+		P3[1] = ((one - cos(theta)) * yv * xv + sin(theta) * zv) * x + (cos(theta) + (one - (cos(theta))) * yv * yv) * y + ((one - (cos(theta))) * yv * zv - (sin(theta)) * xv) * z[0] + ty;
+		P3[2] = ((one - cos(theta)) * zv * xv - sin(theta) * yv) * x + ((one - cos(theta)) * zv * yv + sin(theta) * xv) * y + (cos(theta) + (one - cos(theta)) * zv * zv) * z[0] + tz;
+
+		T predicted_x = T(fx) * (P3[0]) / P3[2] + T(cx);
+		T predicted_y = T(fy) * (P3[1]) / P3[2] + T(cy);
+		T r = tx * tx + ty * ty + tz * tz;
+
+		residuals[0] = (y - T(1.65)) * T(1000);
+	
+		return true;
+	}
+	static ceres::CostFunction* Create(const double observed_x, const double observed_y, const double fx, const double fy,
+		const double cx, const double cy, const double width, const double height, const double tnorm)
+	{
+		return (new ceres::AutoDiffCostFunction<RegulFloor, 1, 7, 1>(new RegulFloor(observed_x, observed_y,
+			fx, fy, cx, cy, width, height, tnorm)));
+	}
+
+	double observed_x;
+	double observed_y;
+	double fx, fy, cx, cy;
+	double tnorm;
+	double width, height;
+};
+/*struct SnavelyReprojectionErrorPtsOldQUAT
+{
+	SnavelyReprojectionErrorPtsOldQUAT(double observed_x, double observed_y, double fx, double fy, double cx, double cy, bool is_ground, double width, double height, double tnorm) :
+		observed_x(observed_x), observed_y(observed_y), fx(fx), fy(fy), cx(cx), cy(cy), is_ground(is_ground), width(width), height(height), tnorm(tnorm) {}
+
+	template <typename T>
+	bool operator()(const T* const quat_t, const T* const z, T* residuals) const
+	{
+
+		T P3[3];
+
+		T theta = quat_t[0];
+		T xv = quat_t[1];
+		T yv = quat_t[2];
+		T zv = quat_t[3];
+
+		T tx = quat_t[4];
+		T ty = quat_t[5];
+		T tz = quat_t[6];
+
+		T x = z[0] * (T(observed_x) - T(cx)) / T(fx);
+		T y = z[0] * (T(observed_y) - T(cy)) / T(fy);
+
+		T one = T(1);
+		P3[0] = (cos(theta) + (one - cos(theta)) * xv * xv) * x + ((one - cos(theta)) * xv * yv - sin(theta) * zv) * y + ((one - cos(theta)) * xv * zv + sin(theta) * yv) * z[0] + tx;
+		P3[1] = ((one - cos(theta)) * yv * xv + sin(theta) * zv) * x + (cos(theta) + (one - (cos(theta))) * yv * yv) * y + ((one - (cos(theta))) * yv * zv - (sin(theta)) * xv) * z[0] + ty;
+		P3[2] = ((one - cos(theta)) * zv * xv - sin(theta) * yv) * x + ((one - cos(theta)) * zv * yv + sin(theta) * xv) * y + (cos(theta) + (one - cos(theta)) * zv * zv) * z[0] + tz;
+
+		T predicted_x = T(fx) * (P3[0]) / P3[2] + T(cx);
+		T predicted_y = T(fy) * (P3[1]) / P3[2] + T(cy);
+		T r = tx * tx + ty * ty + tz * tz;
+
+		residuals[0] = (predicted_x - T(observed_x));
+		residuals[1] = (predicted_y - T(observed_y));
+		residuals[2] = T(0);//is_ground == true ? (y - T(1.65)) : T(0);
+		residuals[3] = T(0);//(x > T(width) || x < 0) || (y > T(height) || y < 0) ? T(1000) : T(0);
+		residuals[4] = T(0);//T(tnorm * tnorm) > r ? T(10000) : T(0);
+		return true;
+	}
+	static ceres::CostFunction* Create(const double observed_x, const double observed_y, const double fx, const double fy,
+		const double cx, const double cy, const bool is_ground, const double width, const double height, const double tnorm)
+	{
+		return (new ceres::AutoDiffCostFunction<SnavelyReprojectionErrorPtsOldQUAT, 5, 7, 1>(new SnavelyReprojectionErrorPtsOldQUAT(observed_x, observed_y,
+			fx, fy, cx, cy, is_ground, width, height, tnorm)));
+	}
+
+	double observed_x;
+	double observed_y;
+	double fx, fy, cx, cy;
+	double tnorm;
+	double width, height;
+	bool is_ground;
+};*/
 struct SnavelyReprojectionErrorPts {
 	SnavelyReprojectionErrorPts(double observed_x, double observed_y, double fx, double fy, double cx, double cy, bool is_ground)
 		: observed_x(observed_x), observed_y(observed_y), fx(fx), fy(fy), cx(cx), cy(cy), is_ground(is_ground){}
@@ -290,6 +455,7 @@ Mat T(Mat& R, Mat& t);
 
 pair<Mat, Mat> EstimateMotion(Mat left, Mat right, Mat next, Mat P_left, Mat P_right);
 pair<Mat, Mat> EstimateNoDynamicMotion(Mat left, Mat right, Mat next, Mat left_segment, Mat P_left, Mat P_right, std::vector<int> dynamic);
+pair<Mat, Mat> EstimateNoDynamicFilterMotion(Mat left, Mat right, Mat next, Mat left_segment, Mat P_left, Mat P_right, std::vector<int> dynamic);
 std::vector<std::vector<KeyPoint>> GetSamePoints(fs::directory_iterator left, fs::directory_iterator next, const int& N_features);
 std::vector<double> Transform_vec(const Mat answer);
 
@@ -300,7 +466,7 @@ void EstimateAndOptimize(const std::string& left_path, const std::string& right_
 void SimplifiedOdometry(const std::string& left_path, const std::string& right_path, const std::string& input, const Mat& PLeft, const Mat& PRight,
 	std::fstream& myfile_);
 void VisualNoDynamic(const std::string& left_path, const std::string& left_path_segment, const std::string& right_path, const std::string& input,
-	const Mat& PLeft, const Mat& PRight, std::vector<int> dynamic, const int step);
+	const Mat& PLeft, const Mat& PRight, std::vector<int> dynamic, const int step, const bool filter);
 void OdometryALL(const std::string& left_path, const std::string& right_path, const std::string& input, const Mat& PLeft, const Mat& PRight, const int step);
 void OdometryAXZ(const std::string& left_path, const std::string& right_path, const std::string& input, const Mat& PLeft, 
 	const Mat& PRight, std::vector<int>& dynamic, const std::string& segment, const std::string& y_coord);
@@ -308,6 +474,7 @@ void OdometryOLD(const std::string& left_path, const std::string& right_path, co
 	std::vector<int>& dynamic, const std::string& segment, const int step);
 void OdometryOLDZ(const std::string& left_path, const std::string& right_path, const std::string& input, const Mat& PLeft, const Mat& PRight,
 	std::vector<int>& dynamic, const std::string& segment, const int step);
-void OdometryQUAT(const std::string& left_path, const std::string& right_path, const std::string& input, const Mat& PLeft, const Mat& PRight, const int step);
+void OdometryQUAT(const std::string& left_path, const std::string& masks,  const std::string& right_path, const std::string& input, const Mat& PLeft, 
+	const Mat& PRight, const int step, const vector<int>& dynamic, const bool reguls);
 Mat ReconstructFromQUAT(double* initial);
 vector<double> GetAnglesVecsFromQuat(Mat& R, Mat& t);
