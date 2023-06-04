@@ -519,7 +519,8 @@ void OdometryALL(const std::string& left_path, const std::string& right_path, co
 	}
 }
 
-void OdometryQUAT(const std::string& left_path, const std::string& right_path, const std::string& input, const Mat& PLeft, const Mat& PRight, const int step)
+void OdometryQUAT(const std::string& left_path, const std::string& masks, const std::string& right_path, const std::string& input, const Mat& PLeft, 
+	const Mat& PRight, const int step, const vector<int>& dynamic, const bool regul)
 {
 
 	Mat GLOBAL_P = Mat::eye(4, 4, CV_32F);
@@ -528,10 +529,11 @@ void OdometryQUAT(const std::string& left_path, const std::string& right_path, c
 	fs::directory_iterator left_iterator(left_path);
 	fs::directory_iterator right_iterator(right_path);
 	fs::directory_iterator next_iterator(left_path);
+	fs::directory_iterator masks_iterator(masks);
 	std::advance(left_iterator, START_KEY_FRAME); // если хотим начать не с 0-го кадра 
 	std::advance(right_iterator, START_KEY_FRAME);
 	std::advance(next_iterator, START_KEY_FRAME + step);
-
+	std::advance(masks_iterator, START_KEY_FRAME);
 	std::ofstream in(input);
 
 	float coeff = cil.cameraMatrix.at<float>(0, 0) * (cir.transVector.at<float>(0) - cil.transVector.at<float>(0));
@@ -543,16 +545,17 @@ void OdometryQUAT(const std::string& left_path, const std::string& right_path, c
 		Mat left = imread((*left_iterator).path().u8string());
 		Mat right = imread((*right_iterator).path().u8string());
 		Mat next = imread((*next_iterator).path().u8string());
-
-
-		pair<Mat, Mat> TR = EstimateMotion(left, right, next, PLeft, PRight);
+		Mat mask = imread((*masks_iterator).path().u8string());
+		cv::cvtColor(mask, mask, CV_BGR2GRAY);
+		Mat resized_seg;
+		resize(mask, resized_seg, Size(left.cols, left.rows), INTER_LINEAR);
+		pair<Mat, Mat> TR = EstimateNoDynamicFilterMotion(left, right, next, resized_seg,  PLeft, PRight, dynamic);
 		TR.first.convertTo(TR.first, CV_32F); // здесь были ошибки с типами до без этих строк  - Ransac возвращает в дабле
 		TR.second.convertTo(TR.second, CV_32F); // здесь были ошибки с типами до без этих строк  - Ransac возвращает в дабле
 		Mat R;
 		cv::Rodrigues(TR.first, R);
 		R.convertTo(R, CV_32F);
 		vector<double> angles_vecs = GetAnglesVecsFromQuat(TR.first, TR.second);
-
 		double initial_point[7];
 		vector<Vec3f> pts3d;
 		vector<Vec2f> pts2d; 
@@ -563,11 +566,13 @@ void OdometryQUAT(const std::string& left_path, const std::string& right_path, c
 
 		KeyPointMatches matcher = AlignImages(left, next);
 		Mat disparity = CalculateDisparity(left, right);
+		vector<bool> is_ground;
 		for (auto& match : matcher.matches)
 		{
 
 			float u = (float(matcher.kp1.at(match.queryIdx).pt.x));
 			float v = (float(matcher.kp1.at(match.queryIdx).pt.y));
+
 			float z = coeff / disparity.at<float>(int(v), int(u));
 			if (z < DEPTH_TRASH && z > 0)
 			{
@@ -576,9 +581,20 @@ void OdometryQUAT(const std::string& left_path, const std::string& right_path, c
 				float y = z * (v - cil.cameraMatrix.at<float>(1, 2)) / cil.cameraMatrix.at<float>(1, 1);
 				pts3d.emplace_back(Point3f{ x, y, z });
 				pts2d.emplace_back(Vec2f(matcher.kp2.at(match.trainIdx).pt.x, matcher.kp2.at(match.trainIdx).pt.y));
+				if (int(resized_seg.at<uchar>(int(v), int(u))) == 0)
+				{
+					is_ground.emplace_back(true);
+					//circle(left, Point(u, v), 5, Scalar(0, 0, 255), -1);
+				}
+				else
+					is_ground.emplace_back(false);
+
+				//line(left, Point(u, v), Point(matcher.kp2.at(match.trainIdx).pt.x, matcher.kp2.at(match.trainIdx).pt.y), Scalar(255, 0, 0), 3);
 			}
 		}
 
+		//imshow("frame", left);
+		//waitKey(0);
 		vector<double*> pts_for;
 		for (int m = 0; m < pts3d.size(); ++m)
 		{
@@ -611,10 +627,40 @@ void OdometryQUAT(const std::string& left_path, const std::string& right_path, c
 
 			if (abs(double(pts2d[j][0]) - predicted_x) < 50 && abs(double(pts2d[j][1]) - predicted_y) < 50)
 			{
-				ceres::CostFunction* cost_function = SnavelyReprojectionErrorPtsOldQUAT::Create(double(pts2d[j][0]), double(pts2d[j][1]), 7.18856e+02, 7.18856e+02, 6.071928e+02, 1.852157e+02);
+				
+				ceres::CostFunction* cost_function;
+				ceres::CostFunction* cost_function_reg;
+				ceres::CostFunction* cost_function_floor;
+				ceres::LossFunction* loss_function = new ceres::HuberLoss(10);
+
+				cost_function = SnavelyReprojectionErrorPtsOldQUAT::Create(double(pts2d[j][0]), double(pts2d[j][1]),
+					7.18856e+02, 7.18856e+02, 6.071928e+02, 1.852157e+02, left.cols, left.rows,
+					sqrt(initial_point[4] * initial_point[4] + initial_point[5] * initial_point[5] + initial_point[6] * initial_point[6]));
 				problem.AddResidualBlock(cost_function, nullptr, initial_point, pts_for[j]);
 
-				
+				cost_function_reg = Regul::Create(double(pts2d[j][0]), double(pts2d[j][1]),
+					7.18856e+02, 7.18856e+02, 6.071928e+02, 1.852157e+02, left.cols, left.rows,
+					sqrt(initial_point[4] * initial_point[4] + initial_point[5] * initial_point[5] + initial_point[6] * initial_point[6]));
+				problem.AddResidualBlock(cost_function_reg, nullptr, initial_point, pts_for[j]);
+
+				if (regul)
+				{
+					if (is_ground[j]) {
+						cost_function_floor = RegulFloor::Create(double(pts2d[j][0]), double(pts2d[j][1]),
+							7.18856e+02, 7.18856e+02, 6.071928e+02, 1.852157e+02, left.cols, left.rows,
+							sqrt(initial_point[4] * initial_point[4] + initial_point[5] * initial_point[5] + initial_point[6] * initial_point[6]));
+						problem.AddResidualBlock(cost_function_floor, nullptr, initial_point, pts_for[j]);
+					}
+				}
+				/*if (is_ground[j] && regul)
+				{
+					cost_function_floor = RegulFloor::Create(double(pts2d[j][0]), double(pts2d[j][1]),
+						7.18856e+02, 7.18856e+02, 6.071928e+02, 1.852157e+02, left.cols, left.rows,
+						sqrt(initial_point[4] * initial_point[4] + initial_point[5] * initial_point[5] + initial_point[6] * initial_point[6]));
+					problem.AddResidualBlock(cost_function_floor, nullptr, initial_point, pts_for[j]);
+				}*/
+
+
 				double start[7];
 				for (int p = 0; p < 7; ++p)
 					start[p] = initial_point[p];
@@ -633,19 +679,19 @@ void OdometryQUAT(const std::string& left_path, const std::string& right_path, c
 						problem.SetParameterUpperBound(initial_point, p, start[p] * 0.90);
 					}
 				}
-				/*
-				double start_ = pts_for[j][0];
 
-				if (start_ >= 0)
+				if (is_ground[j])
 				{
-					problem.SetParameterLowerBound(pts_for[j], 0, start_ * 0.50);
-					problem.SetParameterUpperBound(pts_for[j], 0, start_ * 1.50);
+					double z_initial = pts_for[j][0];
+					problem.SetParameterLowerBound(pts_for[j], 0, z_initial * 0.999);
+					problem.SetParameterUpperBound(pts_for[j], 0, z_initial * 1.001);
 				}
 				else
 				{
-					problem.SetParameterLowerBound(pts_for[j], 0, start_ * 1.50);
-					problem.SetParameterUpperBound(pts_for[j], 0, start_ * 0.50);
-				}*/
+					double z_initial = pts_for[j][0];
+					problem.SetParameterLowerBound(pts_for[j], 0, z_initial * 0.8);
+					problem.SetParameterUpperBound(pts_for[j], 0, z_initial * 1.2);
+				}
 			}
 
 		}
@@ -663,6 +709,7 @@ void OdometryQUAT(const std::string& left_path, const std::string& right_path, c
 		std::advance(left_iterator, step);
 		std::advance(next_iterator, step);
 		std::advance(right_iterator, step);
+		std::advance(masks_iterator, step);
 
 		for (auto& pt : pts_for)
 			delete[] pt;
