@@ -5,21 +5,57 @@ const int STEP = 5;
 
 int main(void) {
 
-	float P0[] = { 7.18856e+02, 0.0e+00, 6.071928e+02, 0.00e+00, 0.0e+00, 7.18856e+02, 1.852157e+02, 0.0e+00, 0.00e+00, 0.0e+00, 1.000e+00, 0.0000e+00 };
-	float P1[] = { 7.18856e+02, 0.0e+00, 6.071928e+02, -3.861448e+02, 0.0e+00, 7.18856e+02, 1.852157e+02, 0.0e+00, 0.00e+00, 0.0e+00, 1.000e+00, 0.0000e+00 };
+	/*
+	float P0[] = {7.070912000000e+02, 0.000000000000e+00, 6.018873000000e+02, 0.000000000000e+00,
+				   0.000000000000e+00, 7.070912000000e+02, 1.831104000000e+02, 0.000000000000e+00,
+		           0.000000000000e+00, 0.000000000000e+00, 1.000000000000e+00, 0.000000000000e+00 };
+	float P1[] = { 7.070912000000e+02, 0.000000000000e+00, 6.018873000000e+02, -3.798145000000e+02,
+				   0.000000000000e+00, 7.070912000000e+02, 1.831104000000e+02, 0.000000000000e+00, 
+		           0.000000000000e+00, 0.000000000000e+00, 1.000000000000e+00, 0.000000000000e+00 };
+				   
+				   */
+	float P0[] = {7.188560000000e+02, 0.000000000000e+00, 6.071928000000e+02, 0.000000000000e+00,
+		           0.000000000000e+00, 7.188560000000e+02, 1.852157000000e+02, 0.000000000000e+00,
+				   0.000000000000e+00, 0.000000000000e+00, 1.000000000000e+00, 0.000000000000e+00 };
+	float P1[] = { 7.188560000000e+02, 0.000000000000e+00, 6.071928000000e+02, -3.861448000000e+02,
+				   0.000000000000e+00, 7.188560000000e+02, 1.852157000000e+02, 0.000000000000e+00,
+				   0.000000000000e+00, 0.000000000000e+00, 1.000000000000e+00, 0.000000000000e+00 };
+	
 	Mat P_left(3, 4, cv::DataType<float>::type, P0);
 	Mat P_right(3, 4, cv::DataType<float>::type, P1);
-	std::string folder_left = "D:/kitti_experiment/lil_dataset/00/image_0/";
-	std::string folder_right = "D:/kitti_experiment/lil_dataset/00/image_1/";
-	std::string segmented_left = "D:/kitti_experiment/lil_dataset/00/kitti_masks/";
+	std::string folder_left = "D:/Kitti/dataset/sequences/00/image_0/";
+	std::string folder_right = "D:/Kitti/dataset/sequences/00/image_1/";
+	std::string segmented_left = "D:/results_v_diplom/kitty00/content/segmentation_masks/";
+	//std::string segmented_left = "D:/Kitti/content/big_dataset/content/dataset/";
 
-	std::string output  = "D:/kitti_experiment/experiments_results/opt_step_Vquat.txt";
-	std::string output_vanilla = "D:/kitti_experiment/experiments_results/opt_step_Vanilla.txt";
-	std::vector dynamic_classes = { 11,12,13,14,15,16,17,18 };
+	std::string output_vanilla = "D:/results_v_diplom/kitty00/Proper/vanilla.txt";
+	std::string output_masks  = "D:/results_v_diplom/kitty00/Proper/vanilla_masks.txt";
+	std::string output_filter = "D:/results_v_diplom/kitty00/Proper/vanilla_filter.txt";
+	std::string output_opt = "D:/results_v_diplom/kitty00/Proper/vanilla_opt.txt";
+	std::string output_regul = "D:/results_v_diplom/kitty00/Proper/vanilla_opt_regul.txt";
+	std::vector<int> dynamic_classes = { 11,12,13,14,15,16,17,18 };
 
 	//OdometryOLD(folder_left, folder_right, output, P_left, P_right, dynamic_classes, segmented_left, 3);
 	//OdometryQUAT(folder_left, folder_right, output, P_left, P_right, 5);
-	VisualOdometry(folder_left, folder_right, output_vanilla, P_left, P_right, 5);
+	//VisualOdometry(folder_left, folder_right, output_vanilla, P_left, P_right, 5);
+	/*Mat src0 = imread("D:/Рабочий стол/Диплом эксперименты/kitty00/content/segmentation_masks/000000.png");
+	cv::cvtColor(src0, src0, CV_BGR2GRAY);
+	for (int x = 0; x < src0.cols; ++x)
+		for (int y = 0; y < src0.rows; ++y)
+			if (int(src0.at<uchar>(y, x)) == 3)
+				src0.at<uchar>(y, x) = 255;
+
+	cvtColor(src0, src0, CV_GRAY2RGB);
+	line(src0, Point(0, 0), Point(255, 255), Scalar(255, 0, 0), 3);
+	imshow("frame", src0);
+	waitKey(0);*/
+
+
+	//VisualOdometry(folder_left, folder_right, output_vanilla, P_left, P_right, 3);
+	//VisualNoDynamic(folder_left, segmented_left, folder_right, output_masks, P_left, P_right, dynamic_classes, 3, true);
+	//VisualNoDynamic(folder_left, segmented_left, folder_right, output_filter, P_left, P_right, dynamic_classes, 3, true);
+	OdometryQUAT(folder_left, segmented_left, folder_right, output_opt, P_left, P_right, 3, dynamic_classes, false);
+	OdometryQUAT(folder_left, segmented_left, folder_right, output_regul, P_left, P_right, 3, dynamic_classes, true);
 	return 0;
 }
 
